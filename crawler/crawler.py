@@ -1,7 +1,10 @@
 import requests
 from bs4 import BeautifulSoup
+import redis
 import json
-import socket
+
+# Connect to Redis
+r = redis.StrictRedis(host='localhost', port=6379, db=0)
 
 def fetch_page(url):
     try:
@@ -25,15 +28,23 @@ def extract_text(html_content):
     return soup.get_text()
 
 def send_result_to_master(crawled_data):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(('master_ip', 9000))  # Replace master_ip
-    s.sendall(json.dumps(crawled_data).encode())
-    s.close()
+    # Send the data back to Master node via Redis
+    r.lpush("crawled_results", json.dumps(crawled_data))
 
-def crawl_task(url):
-    page = fetch_page(url)
-    if page:
-        text = extract_text(page)
-        links = extract_links(page, url)
-        data = {'url': url, 'text': text, 'links': links}
-        send_result_to_master(data)
+def crawl_task():
+    while True:
+        # Pull a URL from the queue
+         url = r.brpop("url_queue", timeout=0)  # Block until we get a URL
+         if url:
+            url = url[1].decode('utf-8')
+            print(f"Crawling URL: {url}")
+            page = fetch_page(url)
+            if page:
+                text = extract_text(page)
+                links = extract_links(page, url)
+                data = {'url': url, 'text': text, 'links': links}
+                send_result_to_master(data)
+                print(f"Fetched links: {links}")
+
+if __name__ == "__main__":
+    crawl_task()

@@ -13,8 +13,7 @@ def search(keyword):
     keyword = keyword.lower()
     return index.get(keyword, [])
 
-# Example
+# Example: Just indexing a single document for testing
 if __name__ == "__main__":
-    # Test
     index_document("https://example.com", "This is a sample page with example content.")
     print(search("example"))  # Should return ['https://example.com']

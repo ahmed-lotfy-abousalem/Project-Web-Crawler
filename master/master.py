@@ -1,43 +1,39 @@
-import socket
-import threading
-import queue
+import redis
 import json
+import threading
+import time
 
-task_queue = queue.Queue()
-crawled_results = []
+# Connect to local Redis server
+r = redis.StrictRedis(host='localhost', port=6379, db=0)
 
 def listener_thread():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(('0.0.0.0', 9000))
-    s.listen()
-    print("Master listening on port 9000...")
-    
     while True:
-        conn, addr = s.accept()
-        data = conn.recv(4096)
-        if data:
-            result = json.loads(data.decode())
-            crawled_results.append(result)
-            for link in result['links']:
-                task_queue.put(link)
-        conn.close()
+        # Poll Redis for completed crawls
+        result = r.blpop("crawled_results", timeout=0)  # block until data arrives
+        if result:
+            crawled_data = json.loads(result[1])
+            print(f"Received data for URL: {crawled_data['url']}")
+            # In a full implementation, this is where you'd add the data to an index
+            # For now, we'll just print it.
+            for link in crawled_data['links']:
+                r.lpush("url_queue", link)  # Push new URLs back to task queue
+            print(f"Distributing more URLs...")
 
 def distribute_tasks():
-    while True:
-        if not task_queue.empty():
-            url = task_queue.get()
-            # Here, ideally you send URL to a free crawler
-            print(f"Distribute: {url}")
+    # Start with some seed URLs
+     seed_urls = ["https://example.com", "https://example.org", "https://example.net"]
+     for url in seed_urls:
+        r.lpush("url_queue", url)
+        print(f"Added seed URL to queue: {url}")
+    
+     while True:
+        time.sleep(1)
 
-def start_master(seed_urls):
-    for url in seed_urls:
-        task_queue.put(url)
-
+def start_master():
     threading.Thread(target=listener_thread, daemon=True).start()
     threading.Thread(target=distribute_tasks, daemon=True).start()
-
     while True:
-        pass  # Keep main thread alive
+        pass  # Keep main thread alive to keep listener running
 
 if __name__ == "__main__":
-    start_master(["https://example.com"])
+    start_master()
