@@ -1,19 +1,39 @@
-index = {}
+import sqlite3
 
-def index_document(url, text):
-    words = text.split()
-    for word in words:
-        word = word.lower()
-        if word not in index:
-            index[word] = []
-        if url not in index[word]:
-            index[word].append(url)
+# Connect to the SQLite database
+def connect_db():
+    conn = sqlite3.connect('crawler_data.db')
+    return conn
 
-def search(keyword):
-    keyword = keyword.lower()
-    return index.get(keyword, [])
+# Search for a keyword in the crawled data
+def search_keyword(keyword):
+    conn = connect_db()
+    c = conn.cursor()
+    
+    # Search for the keyword in the 'text' field of crawled data
+    query = "SELECT url, text FROM crawled_data WHERE text LIKE ?"
+    c.execute(query, ('%' + keyword + '%',))
+    
+    # Fetch all matching results
+    results = c.fetchall()
+    
+    conn.close()
+    
+    # If results are found, return them
+    if results:
+        return results
+    else:
+        return None
 
-# Example: Just indexing a single document for testing
+# Example usage:
 if __name__ == "__main__":
-    index_document("https://example.com", "This is a sample page with example content.")
-    print(search("example"))  # Should return ['https://example.com']
+    # Test the keyword search functionality
+    keyword = "example"  # Replace with the keyword you want to search for
+    search_results = search_keyword(keyword)
+    
+    if search_results:
+        print(f"Found {len(search_results)} result(s) for keyword '{keyword}':")
+        for result in search_results:
+            print(f"URL: {result[0]}, Content: {result[1][:100]}...")  # Display the first 100 chars of content
+    else:
+        print(f"No results found for keyword '{keyword}'")
