@@ -2,6 +2,33 @@ import redis
 import json
 import threading
 import time
+import sqlite3
+
+def create_database():
+    conn = sqlite3.connect('crawler_data.db')
+    c = conn.cursor()
+    
+    # Create a table to store crawled data
+    c.execute('''CREATE TABLE IF NOT EXISTS crawled_data (
+                 url TEXT PRIMARY KEY,
+                 text TEXT,
+                 links TEXT)''')
+    conn.commit()
+    conn.close()
+
+def save_data_to_db(url, text, links):
+    conn = sqlite3.connect('crawler_data.db')
+    c = conn.cursor()
+    
+    # Insert the crawled data into the database
+    c.execute("INSERT OR REPLACE INTO crawled_data (url, text, links) VALUES (?, ?, ?)", 
+              (url, text, ', '.join(links)))
+    conn.commit()
+    conn.close()
+
+# Create the database on the first run
+create_database()
+
 
 # Connect to local Redis server
 r = redis.StrictRedis(host='localhost', port=6379, db=0)
@@ -13,6 +40,15 @@ def listener_thread():
         if result:
             crawled_data = json.loads(result[1])
             print(f"Received data for URL: {crawled_data['url']}")
+            url = crawled_data['url']
+            text = crawled_data['text']
+            links = crawled_data['links']
+            
+            # Save the fetched data to the database
+            save_data_to_db(url, text, links)
+            
+            # Print received and saved data
+            print(f"Received data for URL: {url} and saved to database.")
             # In a full implementation, this is where you'd add the data to an index
             # For now, we'll just print it.
             for link in crawled_data['links']:
