@@ -1,11 +1,12 @@
 import requests
 from bs4 import BeautifulSoup
-import redis
+from google.cloud import pubsub_v1
 import json
 import threading
 import time
 import uuid
 import logging
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -18,28 +19,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger('CrawlerNode')
 
-# Redis connection
-r = redis.StrictRedis(host='10.128.0.2', port=6379, db=0)
-# Node identification
+# GCP configurations
+PROJECT_ID = os.environ.get('GCP_PROJECT_ID', 'web-crawler-458509')
 NODE_ID = str(uuid.uuid4())
-MASTER_URL = "http://10.128.0.2:5000"
+MASTER_URL = "http://34.173.15.32:5000"  # Replace with master VM's external IP
+
+# Pub/Sub clients
+publisher = pubsub_v1.PublisherClient()
+subscriber = pubsub_v1.SubscriberClient()
+
+# Pub/Sub topics
+CRAWLED_RESULTS_TOPIC = f'projects/{PROJECT_ID}/topics/crawled-results'
+HEARTBEATS_TOPIC = f'projects/{PROJECT_ID}/topics/heartbeats'
+TASK_COMPLETE_TOPIC = f'projects/{PROJECT_ID}/topics/task-complete'
+NODE_TASKS_TOPIC = f'projects/{PROJECT_ID}/topics/node-{NODE_ID}-tasks'
+NODE_TASKS_SUB = f'projects/{PROJECT_ID}/subscriptions/node-{NODE_ID}-tasks'
 
 def send_heartbeat():
     """Continuously send heartbeats to master"""
     while True:
         try:
-            response = requests.post(
-                f"{MASTER_URL}/heartbeat",
-                json={"node_id": NODE_ID},
-                timeout=3
+            publisher.publish(
+                HEARTBEATS_TOPIC,
+                json.dumps({"node_id": NODE_ID}).encode('utf-8')
             )
-            if response.status_code == 200:
-                logger.debug("Heartbeat sent successfully")
-            else:
-                logger.warning(f"Heartbeat failed: HTTP {response.status_code}")
+            logger.debug("Heartbeat sent successfully")
         except Exception as e:
             logger.error(f"Heartbeat error: {str(e)}")
-        time.sleep(3)  # Send every 3 seconds
+        time.sleep(3)
 
 def fetch_page(url):
     try:
@@ -64,38 +71,43 @@ def extract_links(html_content, base_url):
 
 def extract_text(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
-    # Remove script and style elements
     for script in soup(["script", "style"]):
         script.decompose()
     return ' '.join(soup.stripped_strings)
 
 def send_result_to_master(crawled_data):
     try:
-        r.lpush("crawled_results", json.dumps(crawled_data))
+        publisher.publish(
+            CRAWLED_RESULTS_TOPIC,
+            json.dumps(crawled_data).encode('utf-8')
+        )
         logger.info(f"Sent results for {crawled_data['url']}")
     except Exception as e:
         logger.error(f"Failed to send results: {e}")
 
 def notify_task_completion(url):
     try:
-        response = requests.post(
-            f"{MASTER_URL}/task_complete",
-            json={"node_id": NODE_ID, "url": url},
-            timeout=3
+        publisher.publish(
+            TASK_COMPLETE_TOPIC,
+            json.dumps({"node_id": NODE_ID, "url": url}).encode('utf-8')
         )
-        if response.status_code == 200:
-            logger.debug(f"Task completion notified for {url}")
-        else:
-            logger.warning(f"Task completion notification failed: HTTP {response.status_code}")
+        logger.debug(f"Task completion notified for {url}")
     except Exception as e:
         logger.error(f"Task completion error: {str(e)}")
 
 def crawl_task():
-    logger.info(f"Starting crawler node {NODE_ID}")
-    while True:
+    # Create node-specific subscription
+    try:
+        subscriber.create_subscription(
+            name=NODE_TASKS_SUB,
+            topic=NODE_TASKS_TOPIC
+        )
+    except:
+        logger.info(f"Subscription {NODE_TASKS_SUB} already exists")
+    
+    def callback(message):
         try:
-            # Get task from node-specific queue
-            url = r.brpop(f"node:{NODE_ID}:tasks", timeout=0)[1].decode('utf-8')
+            url = message.data.decode('utf-8')
             logger.info(f"Processing {url}")
             
             page = fetch_page(url)
@@ -107,14 +119,25 @@ def crawl_task():
                 notify_task_completion(url)
                 logger.info(f"Completed processing {url} with {len(links)} links found")
             else:
-                notify_task_completion(url)  # Even if failed, mark as complete
+                notify_task_completion(url)
                 logger.warning(f"Failed to process {url}")
-                
+            message.ack()
         except Exception as e:
             logger.error(f"Crawler error: {e}")
-            time.sleep(5)  # Prevent tight loop on errors
+            message.nack()
+    
+    subscriber.subscribe(NODE_TASKS_SUB, callback=callback)
+    logger.info(f"Started crawler node {NODE_ID}")
+    while True:
+        time.sleep(1)
 
 if __name__ == "__main__":
+    # Create node-specific topic
+    try:
+        publisher.create_topic(name=NODE_TASKS_TOPIC)
+    except:
+        logger.info(f"Topic {NODE_TASKS_TOPIC} already exists")
+    
     # Start heartbeat thread
     heartbeat_thread = threading.Thread(target=send_heartbeat, daemon=True)
     heartbeat_thread.start()
