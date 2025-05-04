@@ -147,8 +147,8 @@ def indexer_process():
         except Exception as e:
             logger.error(f"Error creating topic {topic}: {e}")
     
-    # Create or verify indexing subscription
-    for _ in range(3):
+    # Create or verify indexing subscription with retries
+    for attempt in range(5):
         try:
             subscriber.create_subscription(
                 request={"name": indexing_subscription_path, "topic": indexing_topic_path}
@@ -159,23 +159,29 @@ def indexer_process():
             logger.info(f"Subscription {indexing_subscription_path} already exists")
             break
         except PermissionDenied as e:
-            logger.warning(f"Permission denied creating subscription {indexing_subscription_path}: {e}. Assuming it exists.")
-            break
+            logger.error(f"Permission denied creating subscription {indexing_subscription_path}: {e}")
+            if attempt == 4:
+                logger.critical(f"Cannot create subscription after {attempt + 1} attempts. Please create it manually with: gcloud pubsub subscriptions create {INDEXING_SUBSCRIPTION_NAME} --topic={INDEXING_TOPIC_NAME} --project={PROJECT_ID}")
+                return
         except Exception as e:
             logger.error(f"Error creating subscription {indexing_subscription_path}: {e}")
-            time.sleep(2)
-    else:
-        logger.critical(f"Failed to create or verify subscription {indexing_subscription_path}")
-        return
+            if attempt == 4:
+                logger.critical(f"Failed to create subscription after {attempt + 1} attempts")
+                return
+            time.sleep(2 ** attempt)  # Exponential backoff
     
+    # Verify subscription exists
     try:
         subscriber.get_subscription(request={"subscription": indexing_subscription_path})
         logger.info(f"Verified subscription {indexing_subscription_path} exists")
     except NotFound:
-        logger.critical(f"Subscription {indexing_subscription_path} does not exist")
+        logger.critical(f"Subscription {indexing_subscription_path} does not exist. Please create it manually with: gcloud pubsub subscriptions create {INDEXING_SUBSCRIPTION_NAME} --topic={INDEXING_TOPIC_NAME} --project={PROJECT_ID}")
         return
     except PermissionDenied as e:
-        logger.warning(f"Permission denied verifying subscription {indexing_subscription_path}: {e}. Proceeding anyway.")
+        logger.warning(f"Permission denied verifying subscription {indexing_subscription_path}: {e}. Proceeding anyway, assuming it exists.")
+    except Exception as e:
+        logger.error(f"Error verifying subscription {indexing_subscription_path}: {e}")
+        return
     
     # Start heartbeat thread
     heartbeat_thread = threading.Thread(target=send_heartbeat, daemon=True)
