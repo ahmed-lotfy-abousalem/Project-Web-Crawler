@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Crawler GUI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.2/babel.min.js"></script>
+    <script src="https://apis.google.com/js/api.js" async defer></script>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body class="bg-gray-100 p-4">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // Configuration
+        const PROJECT_ID = "web-crawler-458509";
+        const CRAWL_TOPIC_NAME = "crawl-tasks-topic";
+        const TASK_COMPLETE_SUBSCRIPTION = "task-complete-sub-ui";
+        const HEARTBEATS_SUBSCRIPTION = "heartbeats-sub-ui";
+        const INDEXER_QUERY_TOPIC = "indexer-query-topic";
+        const INDEXER_RESULTS_SUBSCRIPTION = "indexer-results-sub-ui";
+        const BUCKET_NAME = "abousalem1";
+
+        // Initialize Google API Client
+        let gapiLoaded = false;
+        let gisLoaded = false;
+        let tokenClient;
+        let accessToken = null;
+
+        // Wait for a script to load
+        function waitForGoogleIdentityServices() {
+            return new Promise((resolve, reject) => {
+                const checkInterval = setInterval(() => {
+                    if (window.google && window.google.accounts && window.google.accounts.oauth2) {
+                        clearInterval(checkInterval);
+                        resolve();
+                    }
+                }, 100);
+
+                setTimeout(() => {
+                    clearInterval(checkInterval);
+                    reject(new Error("Google Identity Services failed to load within 10 seconds"));
+                }, 10000);
+            });
+        }
+
+        function initializeGoogleClient() {
+            return new Promise((resolve, reject) => {
+                gapi.load('client', {
+                    callback: async () => {
+                        try {
+                            await gapi.client.init({
+                                apiKey: 'AIzaSyCXUC1VSghMNpZH1gd7hbZxoKJ5wbbYDoI',
+                                discoveryDocs: ['https://pubsub.googleapis.com/$discovery/rest?version=v1'],
+                            });
+                            gapiLoaded = true;
+                            console.log('gapi initialized');
+                        } catch (error) {
+                            console.error('gapi initialization error:', error);
+                            reject(error);
+                            return;
+                        }
+
+                        waitForGoogleIdentityServices()
+                            .then(() => {
+                                tokenClient = google.accounts.oauth2.initTokenClient({
+                                    client_id: '451138362594-1msvi0aiqk96daid1qdnoo8s8rt9itm9.apps.googleusercontent.com',
+                                    scope: 'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.read_only',
+                                    callback: (response) => {
+                                        if (response.error) {
+                                            console.error('OAuth error:', response.error, response.error_description || 'No description');
+                                            reject(new Error(`OAuth failed: ${response.error} - ${response.error_description || 'No description'}`));
+                                        } else {
+                                            accessToken = response.access_token;
+                                            gapi.client.setToken({ access_token: accessToken });
+                                            gisLoaded = true;
+                                            console.log('OAuth initialized, access token:', accessToken);
+                                            resolve();
+                                        }
+                                    },
+                                });
+                                console.log('Requesting access token...');
+                                tokenClient.requestAccessToken();
+                            })
+                            .catch((error) => reject(error));
+                    },
+                    onerror: (error) => reject(error),
+                });
+            });
+        }
+
+        // Pub/Sub and Storage API Functions
+        async function publishMessage(topicName, message) {
+            if (!accessToken) {
+                console.error('No access token available');
+                return;
+            }
+            const topicPath = `projects/${PROJECT_ID}/topics/${topicName}`;
+            try {
+                const response = await gapi.client.pubsub.projects.topics.publish({
+                    topic: topicPath,
+                    resource: {
+                        messages: [{ data: btoa(JSON.stringify(message)) }],
+                    },
+                });
+                console.log(`Published to ${topicName}:`, response);
+            } catch (error) {
+                console.error(`Error publishing to ${topicName}:`, error);
+            }
+        }
+
+        async function subscribeToTopic(subscriptionName, callback) {
+            if (!accessToken) {
+                console.error('No access token available for subscription');
+                return;
+            }
+            const subscriptionPath = `projects/${PROJECT_ID}/subscriptions/${subscriptionName}`;
+            console.log(`Setting up subscription: ${subscriptionPath}`);
+
+            try {
+                gapi.client.pubsub.projects.subscriptions.create({
+                    name: subscriptionPath,
+                    resource: {
+                        topic: subscriptionPath.replace('subscriptions', 'topics').replace(subscriptionName, topicNameFromSubscription(subscriptionName)),
+                        ackDeadlineSeconds: 10,
+                    },
+                }).then(
+                    (response) => {
+                        console.log(`Subscription ${subscriptionName} created successfully:`, response);
+                        startPullingMessages();
+                    },
+                    (err) => {
+                        if (err.status === 409) {
+                            console.log(`Subscription ${subscriptionName} already exists`);
+                            startPullingMessages();
+                        } else {
+                            console.error(`Failed to create subscription ${subscriptionName}:`, err);
+                            throw err;
+                        }
+                    }
+                );
+
+                const startPullingMessages = () => {
+                    const pullMessages = async () => {
+                        try {
+                            console.log(`Pulling messages from ${subscriptionName}...`);
+                            const response = await gapi.client.pubsub.projects.subscriptions.pull({
+                                subscription: subscriptionPath,
+                                resource: { maxMessages: 10 },
+                            });
+                            const messages = response.result.receivedMessages || [];
+                            console.log(`Received ${messages.length} messages from ${subscriptionName}`);
+
+                            messages.forEach((msg) => {
+                                try {
+                                    const data = JSON.parse(atob(msg.message.data));
+                                    console.log(`Message data from ${subscriptionName}:`, data);
+                                    callback(data, msg.ackId);
+                                    gapi.client.pubsub.projects.subscriptions.acknowledge({
+                                        subscription: subscriptionPath,
+                                        resource: { ackIds: [msg.ackId] },
+                                    }).then(() => {
+                                        console.log(`Acknowledged message ${msg.ackId} from ${subscriptionName}`);
+                                    });
+                                } catch (error) {
+                                    console.error(`Error processing message from ${subscriptionName}:`, error);
+                                }
+                            });
+                        } catch (error) {
+                            console.error(`Error pulling from ${subscriptionName}:`, error);
+                        }
+                        setTimeout(pullMessages, 1000);
+                    };
+                    pullMessages();
+                };
+            } catch (error) {
+                console.error(`Error subscribing to ${subscriptionName}:`, error);
+            }
+        }
+
+        function topicNameFromSubscription(subscriptionName) {
+            const mapping = {
+                [TASK_COMPLETE_SUBSCRIPTION]: 'task-complete',
+                [HEARTBEATS_SUBSCRIPTION]: 'heartbeats',
+                [INDEXER_RESULTS_SUBSCRIPTION]: 'indexer-results-topic',
+            };
+            return mapping[subscriptionName] || subscriptionName.replace('-sub-ui', '');
+        }
+
+        // Add a delay utility function
+        function delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        async function fetchGcsContent(gcsPath) {
+            if (!accessToken) {
+                console.error('No access token available for GCS fetch');
+                return 'Authentication error';
+            }
+            const pathParts = gcsPath.replace(`gs://${BUCKET_NAME}/`, '').split('/');
+            const blobName = pathParts.join('/');
+            console.log(`Attempting to fetch GCS content from: gs://${BUCKET_NAME}/${blobName}`);
+
+            // Add a 2-second delay to ensure the crawler has time to upload
+            console.log(`Waiting 2 seconds before fetching ${gcsPath}...`);
+            await delay(2000);
+
+            try {
+                const response = await fetch(`https://storage.googleapis.com/storage/v1/b/${BUCKET_NAME}/o/${encodeURIComponent(blobName)}?alt=media`, {
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                });
+                
+            } catch (error) {
+                console.error(`Detailed error fetching GCS content for ${gcsPath}:`, error);
+                
+            }
+        }
+
+        // React Component
+        function CrawlerApp() {
+            const [url, setUrl] = useState('');
+            const [maxDepth, setMaxDepth] = useState(3);
+            const [crawledResults, setCrawledResults] = useState([]);
+            const [keyword, setKeyword] = useState('');
+            const [indexerResults, setIndexerResults] = useState([]);
+            const [nodes, setNodes] = useState({});
+            const [error, setError] = useState(null);
+            const [authStatus, setAuthStatus] = useState('Authenticating...');
+
+            useEffect(() => {
+                initializeGoogleClient()
+                    .then(() => {
+                        console.log('Google Client initialized successfully');
+                        setAuthStatus('Authenticated');
+                    })
+                    .catch((err) => {
+                        setError('Failed to initialize Google Client: ' + err.message);
+                        setAuthStatus('Authentication Failed');
+                        console.error('Initialization error:', err);
+                    });
+            }, []);
+
+            useEffect(() => {
+                if (accessToken) {
+                    subscribeToTopic(TASK_COMPLETE_SUBSCRIPTION, async (data, ackId) => {
+                        console.log('Received task-complete message:', data);
+                        const gcsPath = `gs://${BUCKET_NAME}/crawled/${data.url.replace('/', '_')}.html`;
+                        const content = await fetchGcsContent(gcsPath);
+                        console.log('Adding to crawledResults:', { url: data.url, content: content, timestamp: new Date().toISOString() });
+                        setCrawledResults((prev) => {
+                            const newResults = [...prev, { url: data.url, content: content, timestamp: new Date().toISOString() }];
+                            console.log('Updated crawledResults:', newResults);
+                            return newResults;
+                        });
+                    });
+                }
+            }, [accessToken]);
+
+            useEffect(() => {
+                if (accessToken) {
+                    subscribeToTopic(HEARTBEATS_SUBSCRIPTION, (data) => {
+                        const nodeId = data.node_id;
+                        setNodes((prev) => ({
+                            ...prev,
+                            [nodeId]: { lastHeartbeat: Date.now(), status: 'Connected' },
+                        }));
+                    });
+
+                    const interval = setInterval(() => {
+                        setNodes((prev) => {
+                            const updated = { ...prev };
+                            Object.keys(updated).forEach((nodeId) => {
+                                if (Date.now() - updated[nodeId].lastHeartbeat > 4000) {
+                                    updated[nodeId].status = 'Disconnected';
+                                }
+                            });
+                            return updated;
+                        });
+                    }, 1000);
+
+                    return () => clearInterval(interval);
+                }
+            }, [accessToken]);
+
+            useEffect(() => {
+                if (accessToken) {
+                    subscribeToTopic(INDEXER_RESULTS_SUBSCRIPTION, (data) => {
+                        setIndexerResults(data.results || []);
+                    });
+                }
+            }, [accessToken]);
+
+            const handleCrawl = () => {
+                if (!url) {
+                    setError('Please enter a URL');
+                    return;
+                }
+                if (!accessToken) {
+                    setError('Authentication required. Please wait or refresh the page.');
+                    return;
+                }
+                publishMessage(CRAWL_TOPIC_NAME, {
+                    url: url,
+                    max_depth: parseInt(maxDepth),
+                    current_depth: 1,
+                });
+                setUrl('');
+                setError(null);
+            };
+
+            const handleSearch = () => {
+                if (!keyword) {
+                    setError('Please enter a keyword');
+                    return;
+                }
+                if (!accessToken) {
+                    setError('Authentication required. Please wait or refresh the page.');
+                    return;
+                }
+                publishMessage(INDEXER_QUERY_TOPIC, { keyword: keyword });
+                setKeyword('');
+                setError(null);
+            };
+
+            return (
+                <div className="container mx-auto p-4">
+                    <div className="mb-4">
+                        <span className={authStatus === 'Authenticated' ? 'text-green-500' : 'text-red-500'}>
+                            {authStatus}
+                        </span>
+                    </div>
+                    {error && <div className="text-red-500 mb-4">{error}</div>}
+                    <h1 className="text-3xl font-bold mb-4">Web Crawler Dashboard</h1>
+
+                    <div className="mb-6 p-4 bg-white rounded shadow">
+                        <h2 className="text-xl font-semibold mb-2">Crawler</h2>
+                        <div className="flex space-x-2 mb-2">
+                            <input
+                                type="text"
+                                value={url}
+                                onChange={(e) => setUrl(e.target.value)}
+                                placeholder="Enter URL to crawl (e.g., https://example.com)"
+                                className="flex-1 p-2 border rounded"
+                            />
+                            <input
+                                type="number"
+                                value={maxDepth}
+                                onChange={(e) => setMaxDepth(e.target.value)}
+                                placeholder="Max Depth"
+                                className="w-24 p-2 border rounded"
+                                min="1"
+                            />
+                            <button
+                                onClick={handleCrawl}
+                                className="bg-blue-500 text-white p-2 rounded hover:bg-blue-600"
+                            >
+                                Crawl
+                            </button>
+                        </div>
+                        <div className="mt-2">
+                            <h3 className="font-semibold">Crawled Results:</h3>
+                            <div className="max-h-64 overflow-y-auto border p-2">
+                                {crawledResults.length === 0 ? (
+                                    <p>No results yet.</p>
+                                ) : (
+                                    crawledResults.map((result, index) => (
+                                        <div key={index} className="mb-2">
+                                            <p><strong>URL:</strong> {result.url}</p>
+                                            <p><strong>Time:</strong> {result.timestamp}</p>
+                                            <pre className="text-sm">{result.content}</pre>
+                                            <hr />
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="mb-6 p-4 bg-white rounded shadow">
+                        <h2 className="text-xl font-semibold mb-2">Indexer</h2>
+                        <div className="flex space-x-2 mb-2">
+                            <input
+                                type="text"
+                                value={keyword}
+                                onChange={(e) => setKeyword(e.target.value)}
+                                placeholder="Enter keyword to search"
+                                className="flex-1 p-2 border rounded"
+                            />
+                            <button
+                                onClick={handleSearch}
+                                className="bg-green-500 text-white p-2 rounded hover:bg-green-600"
+                            >
+                                Search
+                            </button>
+                        </div>
+                        <div className="mt-2">
+                            <h3 className="font-semibold">Indexer Results:</h3>
+                            <div className="max-h-64 overflow-y-auto border p-2">
+                                {indexerResults.length > 0 ? (
+                                    indexerResults.map((result, index) => (
+                                        <p key={index}>{result}</p>
+                                    ))
+                                ) : (
+                                    <p>No results found.</p>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="p-4 bg-white rounded shadow">
+                        <h2 className="text-xl font-semibold mb-2">Running Nodes</h2>
+                        <div className="border p-2">
+                            {Object.keys(nodes).length > 0 ? (
+                                Object.entries(nodes).map(([nodeId, info]) => (
+                                    <div key={nodeId} className="flex justify-between mb-1">
+                                        <span>Node {nodeId}</span>
+                                        <span className={info.status === 'Connected' ? 'text-green-500' : 'text-red-500'}>
+                                            {info.status}
+                                        </span>
+                                    </div>
+                                ))
+                            ) : (
+                                <p>No nodes connected.</p>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<CrawlerApp />);
+    </script>
+</body>
+</html>
