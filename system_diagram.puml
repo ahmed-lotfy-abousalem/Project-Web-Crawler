@@ -1,0 +1,62 @@
+@startuml Web Crawler System Architecture
+
+' Styling
+skinparam componentStyle uml2
+skinparam backgroundColor white
+skinparam handwritten false
+
+' Cloud components
+cloud "Google Cloud Platform" {
+    queue "Pub/Sub Topics" {
+        [crawl-tasks-topic] as crawlTopic
+        [indexing-tasks-topic] as indexTopic
+        [heartbeats] as heartbeatTopic
+        [task-complete] as completeTopic
+    }
+    database "Google Cloud Storage" {
+        [Bucket: abousalem1] as gcs
+    }
+}
+
+' Crawler components
+package "Crawler Node" {
+    component "Crawler Process" as crawlerProcess {
+        [CrawlerSpider] as spider
+        [URL Manager] as urlManager
+        [Heartbeat Thread] as heartbeat
+    }
+}
+
+' External components
+cloud "Internet" {
+    [Web Pages] as webPages
+}
+
+' Relationships and data flow
+crawlerProcess --> crawlTopic : Subscribes to
+spider --> webPages : Crawls
+spider --> gcs : Stores HTML content
+spider --> indexTopic : Publishes indexing tasks
+heartbeat --> heartbeatTopic : Sends heartbeats
+spider --> completeTopic : Reports completion
+urlManager --> crawlTopic : Publishes new URLs
+
+' Notes
+note right of spider
+  - Extracts links
+  - Stores content
+  - Manages depth
+end note
+
+note right of gcs
+  Stores crawled HTML
+  content with URL-based
+  naming
+end note
+
+note right of heartbeatTopic
+  Keeps track of
+  active nodes
+end note
+
+@enduml 

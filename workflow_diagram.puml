@@ -1,0 +1,93 @@
+@startuml Web Crawler System Workflow
+
+' Styling
+skinparam componentStyle uml2
+skinparam backgroundColor white
+skinparam handwritten false
+skinparam activityDiamondBackgroundColor white
+skinparam activityEndColor #8B0000
+skinparam activityBorderColor black
+skinparam activityBackgroundColor white
+skinparam arrowColor black
+
+' Title
+title Web Crawler System Workflow
+
+|User/GUI|
+start
+:Enter URL and Max Depth;
+
+|#FFE4E1|Master Node|
+:Receive Crawl Request;
+:Create Crawl Task;
+:Publish to crawl-tasks-topic;
+
+|#FFCCCB|Crawler Node|
+:Pull Crawl Task;
+:Validate URL;
+
+if (URL Valid?) then (yes)
+  if (Already Crawled?) then (no)
+    if (Within Max Depth?) then (yes)
+      :Crawl Web Page;
+      :Extract Links;
+      :Store HTML in GCS;
+      fork
+        :Publish New URLs 
+        to crawl-tasks-topic;
+        :Update URL Depths;
+      fork again
+        :Create Indexing Task;
+        :Publish to indexing-tasks-topic;
+      end fork
+    else (no)
+      :Skip - Max Depth Exceeded;
+    endif
+  else (yes)
+    :Skip - Already Crawled;
+  endif
+else (no)
+  :Skip - Invalid URL;
+endif
+
+|#FFB6B6|Indexer Node|
+:Pull Indexing Task;
+:Download HTML from GCS;
+:Parse HTML Content;
+:Extract Text;
+:Tokenize Words;
+:Calculate Term Frequencies;
+:Update Inverted Index;
+:Store Index in GCS;
+
+|#FF9999|Search Process|
+:User Enters Search Query;
+:Load Inverted Index;
+:Process Query;
+:Calculate Relevance Scores;
+:Return Search Results;
+
+|User/GUI|
+:Display Results;
+
+' Monitoring Flow
+|#FF8080|System Monitoring|
+fork
+  :Monitor Node Heartbeats;
+  :Track Task Status;
+  :Handle Node Failures;
+  :Requeue Failed Tasks;
+end fork
+
+stop
+
+legend right
+  |Color|Component|
+  |<#FFE4E1>|Master Node|
+  |<#FFCCCB>|Crawler Node|
+  |<#FFB6B6>|Indexer Node|
+  |<#FF9999>|Search Process|
+  |<#FF8080>|System Monitoring|
+endlegend
+
+@enduml
