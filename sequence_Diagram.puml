@@ -1,0 +1,32 @@
+@startuml D1
+actor GUI
+participant "Master" as Master
+participant "PubSub" as PubSub
+participant "Crawler" as Crawler
+participant "GCS" as GCS
+participant "Indexer" as Indexer
+
+GUI -> Master: Start Crawl (via PubSub)
+Master -> PubSub: Publish to crawl-tasks-topic (URL: example.com)
+PubSub -> Crawler: Pull task from crawl-tasks-topic-sub
+Crawler -> Crawler: Crawl URL (example.com)
+Crawler -> GCS: Store content (crawled/example_com.html)
+Crawler -> PubSub: Publish to indexing-tasks-topic (URL, GCS path)
+Crawler -> PubSub: Publish to task-complete (URL)
+PubSub -> Master: Notify task-complete
+PubSub -> Indexer: Pull task from indexing-tasks-topic-sub
+Indexer -> GCS: Fetch content (crawled/example_com.html)
+Indexer -> Indexer: Build inverted index
+Indexer -> GCS: Store index (index/inverted_index_<NODE_ID>.json)
+Indexer -> PubSub: Publish to task-complete
+PubSub -> Master: Notify task-complete
+PubSub -> GUI: Notify task-complete-sub-ui
+GUI -> GCS: Fetch content (crawled/example_com.html)
+GUI -> GUI: Display results
+
+
+note right of Crawler: Sends heartbeats to heartbeats-topic
+note right of Indexer: Sends heartbeats to heartbeats-topic
+note right of Master: Monitors heartbeats and re-queues tasks if node fails
+
+@enduml
